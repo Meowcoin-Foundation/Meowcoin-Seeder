@@ -1,6 +1,6 @@
 """ Cloudflare interface """
 import logging
-import CloudFlare
+import cloudflare
 import errors
 import string
 
@@ -18,16 +18,11 @@ def _lookup_zone_id(cloudflare, domain):
     """ Return the zone_id for a given domain using the cloudflare interface. """
 
     logger.info("Resolving cloudflare zoneid for domain name: ".format(domain))
-    zones = cloudflare.zones.get(params={'name': domain})
-
-    if not len(zones):
-        raise errors.ZoneNotFound("Could not find zone named: {}".format(domain))
-
-    if len(zones) > 1:
-        raise errors.TooManyZones("More than one zone found named: {}".format(domain))
-
-    return zones[0]['id']
-
+    zones = cloudflare.zones.list()
+    for zone in zones:
+        if zone.name == domain:
+            return zone.id
+    raise errors.ZoneNotFound(f"Zone not found for domain: {domain}")
 
 class CloudflareSeeder(object):
 
@@ -52,7 +47,7 @@ class CloudflareSeeder(object):
         """ Constructor: set the member variables. """
 
         logger.debug("CloudflareSeeder creation for user: {} domain: {} name: {}".format(user, domain, name))
-        self.cf = CloudFlare.CloudFlare(email=user, token=key)
+        self.cf = cloudflare.Cloudflare(api_email=user, api_key=key)
         self.domain = domain
         self.name = name
         self._zone_id = None
@@ -67,62 +62,37 @@ class CloudflareSeeder(object):
 
         return self._zone_id
 
-    def get_seed_records(self, flags=False):
-
-        """ Get the seed dns records, i.e., those which are type A or AAAA and match the name. """
-
-        page = 0
-        records = []
+    def get_seed_records(self):
         zone_id = self.zone_id
-
-        name_parts = [self.name, self.domain]
-
-        if flags:
-            name_parts.insert(0, 'x9')
-
-        default_params = {'name': '.'.join(name_parts), 'type': 'A,AAAA', 'per_page': 10}
-
-        self.cf._base.raw = True
-        while True:
-            page += 1
-            default_params['page'] = page
-
-            logger.info("Getting page {} of DNS entries".format(page))
-
-            raw_results = self.cf.zones.dns_records.get(zone_id, params=default_params)
-            records.extend(raw_results['result'])
-
-            num_pages = raw_results['result_info']['total_pages']
-            if page == num_pages or num_pages == 0:
-                logger.debug("Fetched all pages of DNS seeds in cloudflare.")
-                break
-
-        self.cf._base.raw = False
-
-        return records
+        dns_records = self.cf.dns.records.list(zone_id=zone_id)
+        return dns_records
 
     def get_seeds(self):
 
         """ Read the seeds for the zone and name in cloudflare. """
 
         logger.debug("Getting seeds from cloudflare")
-        return [record['content'] for record in self.get_seed_records()]
+        return [record.content for record in self.get_seed_records()]
 
     def _set_seed(self, seed, ttl=None, flags=False):
 
         """ Set either a flags or no flags seed entry in cloud flare. """
 
         logger.debug("Setting seed {} in cloudflare".format(seed))
-        new_record = {'name': self.name if not flags else 'x9.' + self.name, 'type': 'AAAA' if isipv6(seed) else 'A', 'content': seed}
+        new_record = {
+            'name': self.name if not flags else 'x9.' + self.name,
+            'type': 'AAAA' if isipv6(seed) else 'A',
+            'content': seed
+        }
 
         if ttl is not None:
             new_record['ttl'] = ttl
 
         logger.debug("Posting record {}".format(new_record))
         try:
-            self.cf.zones.dns_records.post(self.zone_id, data=new_record)
+            self.cf.dns.records.create(zone_id=self.zone_id, **new_record)
         except CloudFlare.exceptions.CloudFlareAPIError as e:
-            logger.error("Error setting seed through the cloudflare API: %d %s"%(e, e))
+            logger.error("Error setting seed through the cloudflare API: %d %s" % (e, e))
 
     def set_seed(self, seed, ttl=None):
 
@@ -136,10 +106,10 @@ class CloudflareSeeder(object):
         """ Delete the seeds' DNS entries in cloudflare. """
 
         logger.debug("Deleting seeds from cloudflare.")
-        for seed_record in self.get_seed_records() + self.get_seed_records(flags=True):
-            if seed_record['content'] in seeds:
-                logger.debug("Found seed to delete: {}".format(seed_record['content']))
-                self.cf.zones.dns_records.delete(self.zone_id, seed_record['id'])
+        for seed_record in self.get_seed_records():
+            if seed_record.content in seeds:
+                logger.debug("Found seed to delete: {}".format(seed_record.content))
+                self.cf.dns.records.delete(seed_record.id, zone_id=self.zone_id)
 
     def set_seeds(self, seeds, ttl=None):
 
@@ -147,4 +117,3 @@ class CloudflareSeeder(object):
 
         for seed in seeds:
             self.set_seed(seed, ttl)
-
