@@ -107,7 +107,7 @@ class CloudflareSeeder(object):
 
         logger.debug("Deleting seeds from cloudflare.")
         for seed_record in self.get_seed_records():
-            if seed_record.content in seeds:
+            if seed_record.name.startswith(self.name) and seed_record.content in seeds:
                 logger.debug("Found seed to delete: {}".format(seed_record.content))
                 self.cf.dns.records.delete(seed_record.id, zone_id=self.zone_id)
 
